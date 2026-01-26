@@ -1,0 +1,16 @@
+{
+    "CameraDefaultSettings": {
+        "width": 1288,
+        "height": 964,
+        "exposure_time": 1000,
+        "gain": 0,
+        "brightness": 1.367188,
+        "frame_rate": 8,
+        "serial_number": "16114212",
+        "min_shutter_value": 51,
+        "max_shutter_value": 1036380,
+        "adjustment_factor": 0.1,
+        "saturation_lower_bound": 165.0,
+        "saturation_upper_bound": 205.0
+    }
+}

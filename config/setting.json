@@ -1,0 +1,25 @@
+{
+    "CameraDefaultSettings": {
+        "width": 1288,
+        "height": 964,
+        "handling_mode": "NewestOnly",
+        "acquisition_mode": "Continuous",
+        "camera_video_mode": "Mono8",
+        "camera_packet_size": 9000,
+        "camera_packet_delay": 100,
+        "exposure_time": 65975,
+        "frame_rate": 8,
+        "heartbeat_timeout": 3000,
+        "brightness": 1.367188,
+        "sharpness": 1532,
+        "gain": 0,
+        "gamma": 1,
+        "serial_number": "16114212",
+        "ip": "16114212",
+        "length_of_runners": 714150,
+        "step_per_mm": 3174.0,
+        "focus_position": 51.0,
+        "focus_point": 0,
+        "delay_time": 0
+    }
+}

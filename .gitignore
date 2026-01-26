@@ -1,0 +1,30 @@
+# --- PyInstaller ---
+/build/
+/dist/
+/*.spec
+/build/**/base_library.zip
+/build/**/*.toc
+/build/**/*.pkg
+/build/**/*.pyz
+/build/**/warn-*.txt
+/build/**/xref-*.html
+
+# --- Python cache ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# --- Virtual env ---
+.venv/
+venv/
+env/
+
+# --- Logs ---
+*.log
+
+# --- IDE/OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
