@@ -164,15 +164,6 @@ class AxisController(DeviceInterface):
             # Jei tavo sistemoje stop-all kitaip realizuotas, čia neužmušam programos.
             pass
 
-    # def _go_home(self, axis_no: int) -> bool:
-    #     response = self.send_query(AxisControllerCommands.go_home(axis_no), 1)
-
-    #     first_line = str(response).splitlines()[0].strip() if response is not None else ""
-    #     print(f"[axis {axis_no}] HOME first_line: {first_line!r}")
-
-    #     AxisControllerParser.parse_error_message(response)
-    #     AxisControllerParser.parse_response_successful(first_line)
-    #     return True
 
     def _go_home(self, axis_no: int, timeout_s: float = 30.0, poll_s: float = 0.2) -> bool:
         t0 = time.time()

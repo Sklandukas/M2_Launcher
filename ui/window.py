@@ -1,12 +1,17 @@
 import os
 import time
+import traceback
 import matplotlib.pyplot as plt
 import numpy as np
-import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox
+
 from ui.SettingsWindow import SettingsDialog, get_settings
-from ExternalFileServer.ExternalFilerServerClientConnection import (get_smb_client, check_server_connection)
+from ExternalFileServer.ExternalFilerServerClientConnection import (
+    get_smb_client,
+    check_server_connection
+)
+
 
 class AppWindow:
     def __init__(self, root, camera_worker):
@@ -28,6 +33,7 @@ class AppWindow:
 
         self.root.bind("<Configure>", self.on_resize)
 
+    # ---------------- UI ----------------
     def _init_gui(self):
         self.main_frame = tk.Frame(self.root)
         self.main_frame.pack(fill=tk.BOTH, expand=True)
@@ -52,7 +58,7 @@ class AppWindow:
         )
         self.stop_button.pack(pady=5, fill=tk.X)
 
-        # ašių / lazerio zona (be "Connect to Axis" mygtuko)
+        # ašių / lazerio zona
         self.axis_frame = tk.Frame(self.control_frame)
         self.axis_frame.pack(pady=5, fill=tk.X)
 
@@ -91,8 +97,8 @@ class AppWindow:
         self.start_button.pack(pady=5, fill=tk.X)
 
         self.handmode_button = tk.Button(
-            self.operation_frame, text = "Measurements from photos", state = tk.NORMAL,
-            bg = "green", fg = "white", width = 20, height = 2, font = ("Arial", 12, "bold")
+            self.operation_frame, text="Measurements from photos", state=tk.NORMAL,
+            bg="green", fg="white", width=20, height=2, font=("Arial", 12, "bold")
         )
         self.handmode_button.pack(pady=5, fill=tk.X)
 
@@ -158,9 +164,8 @@ class AppWindow:
             fg="white",
             width=10,
             height=1,
-            command=self.open_take_photo_dialog 
+            command=self.open_take_photo_dialog
         )
-
         self.take_photo_button.pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
 
         self.status_label = tk.Label(self.root, text="", font=("Arial", 8), anchor="e")
@@ -206,7 +211,7 @@ class AppWindow:
         self.settings_dialog.settings_window.deiconify()
 
     def update_status_label(self, status=None):
-        if status is None: 
+        if status is None:
             self.status_label.config(text="Checking Connection...", fg="blue")
         elif status:
             self.status_label.config(text="Connected Successfully", fg="green")
@@ -227,6 +232,7 @@ class AppWindow:
             messagebox.showerror("Process Error", f"Could not start process: {e}")
             traceback.print_exc()
 
+    # ---------------- Photo dialog ----------------
     def open_take_photo_dialog(self):
         dlg = tk.Toplevel(self.root)
         dlg.title("Photo name")
@@ -252,7 +258,6 @@ class AppWindow:
             if not name:
                 msg.config(text="Pavadinimas negali būti tuščias")
                 return
-
             dlg.destroy()
             self.camera_worker.take_photo(name)
 
@@ -267,8 +272,25 @@ class AppWindow:
         dlg.bind("<Return>", lambda e: on_ok())
         dlg.bind("<Escape>", lambda e: on_cancel())
 
-    def test_axis_callback(self):
-        self.camera_worker.start_process()
+    def _get_measurement_folder(self):
+        gif_path = getattr(self.camera_worker, "gif_path", None)
+        fig_path = getattr(self.camera_worker, "figure_path", None)
+
+        if gif_path and os.path.exists(gif_path):
+            return os.path.dirname(os.path.abspath(gif_path))
+
+        if fig_path and os.path.exists(fig_path):
+            return os.path.dirname(os.path.abspath(fig_path))
+
+        return None
+
+    @staticmethod
+    def _join_smb(parent: str, child: str) -> str:
+        parent = str(parent).replace("\\", "/").rstrip("/")
+        child = str(child).replace("\\", "/").strip("/")
+        if not parent.startswith("/"):
+            parent = "/" + parent
+        return f"{parent}/{child}" if child else parent
 
     def _get_smb_client(self):
         smb_client = get_smb_client()
@@ -279,94 +301,74 @@ class AppWindow:
             if not username or not password:
                 messagebox.showerror("SMB Error", "No login credentials identified. Check your settings.")
                 return None
-            smb_client = check_server_connection(username, password, self.camera_worker.serial_number)
+
+            cam_sn = getattr(self.camera_worker, "serial_number", None) or "UNKNOWN_CAM"
+            smb_client = check_server_connection(username, password, cam_sn)
             if not smb_client:
                 messagebox.showerror("SMB Error", "Unable to connect to the SMB server. Check your settings.")
                 return None
         return smb_client
 
-    def simple_directory_dialog(self, directories):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Select the SMB folder for saving")
-        dialog.geometry("400x300")
-        dialog.grab_set()
+    def _find_folder_containing_laser_sn(self, smb_client, laser_sn: str):
+        try:
+            directories = smb_client.list_directories()
+        except Exception as e:
+            print(f"Error listing SMB directories: {e}")
+            traceback.print_exc()
+            return None
 
-        selected_dir = [None]
+        if not directories:
+            print("SMB: directory list is empty")
+            return None
 
-        def on_select():
-            selected_index = directory_listbox.curselection()
-            if selected_index:
-                selected_dir[0] = directories[selected_index[0]]
-            dialog.destroy()
+        needle = str(laser_sn).strip()
+        matches = sorted([str(d) for d in directories if needle in str(d)])
 
-        def on_cancel():
-            dialog.destroy()
+        if not matches:
+            print(f"No SMB folder found containing: {needle}")
+            return None
 
-        frame = ttk.Frame(dialog, padding="10")
-        frame.pack(fill=tk.BOTH, expand=True)
+        print(f"FOUND folders containing '{needle}':")
+        for m in matches:
+            print("  -", m)
 
-        label = ttk.Label(frame, text="Select folder:")
-        label.pack(anchor=tk.W, pady=(0, 5))
-
-        scrollbar = ttk.Scrollbar(frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        directory_listbox = tk.Listbox(frame, yscrollcommand=scrollbar.set)
-        directory_listbox.pack(fill=tk.BOTH, expand=True)
-        scrollbar.config(command=directory_listbox.yview)
-
-        for directory in directories:
-            directory_listbox.insert(tk.END, directory)
-
-        button_frame = ttk.Frame(frame)
-        button_frame.pack(fill=tk.X, pady=(10, 0))
-
-        select_button = ttk.Button(button_frame, text="Choose", command=on_select)
-        select_button.pack(side=tk.RIGHT, padx=(5, 0))
-
-        cancel_button = ttk.Button(button_frame, text="Cancel", command=on_cancel)
-        cancel_button.pack(side=tk.RIGHT)
-
-        directory_listbox.bind("<Double-1>", lambda event: on_select())
-        self.root.wait_window(dialog)
-        return selected_dir[0]
-
-    def _get_selected_directory(self, smb_client):
-        settings = get_settings()
-        selected_directory = settings.get("selected_folder")
-
-        if not selected_directory:
-            try:
-                directories = smb_client.list_directories()
-                if not directories:
-                    messagebox.showwarning("Warning", "No folders found on the SMB server.")
-                    return None
-                selected_directory = self.simple_directory_dialog(directories)
-            except Exception as e:
-                print(f"Error getting a list of folders: {e}")
-                messagebox.showerror("SMB Error", f"Error getting a list of folders: {e}")
-                return None
-
-        if not selected_directory:
-            messagebox.showinfo("Information", "Folder not selected. Files not saved.")
-        return selected_directory
+        chosen = matches[0]
+        print(f"Chosen folder: {chosen}")
+        return chosen
 
     def _create_new_folder(self, smb_client, parent_directory, folder_name):
-        new_folder_path = f"{parent_directory}/{folder_name}"
-        try:
-            if hasattr(smb_client, "directory_exists") and not smb_client.directory_exists(new_folder_path):
-                if hasattr(smb_client, "create_folder"):
-                    smb_client.create_folder(parent_directory=parent_directory, new_folder_name=folder_name)
-                else:
-                    messagebox.showerror("SMB Error", "SMB client does not support folder creation.")
-                    return None
-        except Exception as e:
-            print(f"Error creating new directory: {e}")
-            messagebox.showerror("SMB Error", f"Error creating new directory: {e}")
+        parent_directory = str(parent_directory).replace("\\", "/").strip().strip("/")
+        folder_name = str(folder_name).replace("\\", "/").strip().strip("/")
+
+        new_folder_path = f"{parent_directory}/{folder_name}" if parent_directory else folder_name
+
+        if not hasattr(smb_client, "create_folder"):
+            messagebox.showerror("SMB Error", "SMB client does not support folder creation.")
             return None
+
+        try:
+            smb_client.create_folder(parent_directory=parent_directory, new_folder_name=folder_name)
+            print(f"Created folder on SMB: {new_folder_path}")
+        except Exception as e:
+            msg = str(e).lower()
+            if "exists" in msg or "already" in msg:
+                print(f"Folder already exists on SMB: {new_folder_path}")
+            else:
+                print(f"Error creating folder '{new_folder_path}': {e}")
+                traceback.print_exc()
+                return None
+
+        if hasattr(smb_client, "directory_exists"):
+            try:
+                if not smb_client.directory_exists(new_folder_path):
+                    print(f"SMB says folder still does not exist: {new_folder_path}")
+                    return None
+            except Exception:
+                pass
+
         return new_folder_path
 
-    def _upload_files(self, smb_client, new_folder_path):
+    def _upload_files(self, smb_client, remote_folder_path):
         uploaded_files = []
         file_paths = [
             (getattr(self.camera_worker, "gif_path", None), "GIF"),
@@ -377,15 +379,15 @@ class AppWindow:
             if file_path and os.path.exists(file_path):
                 file_name = os.path.basename(file_path)
                 try:
-                    print(f"Uploading {file_type}: {file_path} → {new_folder_path}/{file_name}")
-                    smb_client.upload_file(file_path, new_folder_path, file_name)
+                    print(f"Uploading {file_type}: {file_path} → {remote_folder_path}/{file_name}")
+                    smb_client.upload_file(file_path, remote_folder_path, file_name)
                     uploaded_files.append(file_name)
                 except Exception as e:
                     print(f"Error uploading {file_type.lower()} file: {e}")
                     messagebox.showerror("SMB Error", f"Error uploading {file_type.lower()} file: {e}")
         return uploaded_files
 
-    def _upload_txt_files(self, smb_client, new_folder_path):
+    def _upload_txt_files(self, smb_client, remote_folder_path):
         txt_name = "data_results"
         work_path = os.getcwd()
         try:
@@ -393,30 +395,48 @@ class AppWindow:
                 for file in files:
                     if file.endswith(".txt") and txt_name in file:
                         txt_path = os.path.join(root_, file)
-                        print(f"Uploading: {txt_path} → {new_folder_path}/{file}")
-                        smb_client.upload_file(txt_path, new_folder_path, file)
+                        print(f"Uploading: {txt_path} → {remote_folder_path}/{file}")
+                        smb_client.upload_file(txt_path, remote_folder_path, file)
         except Exception as e:
             print(f"Error uploading txt files: {e}")
             messagebox.showerror("SMB Error", f"Error uploading txt files: {e}")
 
-    def _upload_csv_file(self, smb_client, new_folder_path):
-        key = "meta_data"
-        work_path = os.getcwd()
+    def _upload_csv_from_same_folder_as_gif_png(self, smb_client, remote_folder_path):
+        measurement_dir = self._get_measurement_folder()
+        if not measurement_dir:
+            print("CSV upload skipped: measurement folder not found (no gif_path/figure_path).")
+            return
+
+        print(f"Looking for CSV files in: {measurement_dir}")
+
         try:
-            for root_, _, files in os.walk(work_path):
-                for file in files:
-                    if file.endswith(".csv") and key in file:
-                        csv_path = os.path.join(root_, file)
-                        print(f"Uploading: {csv_path} → {new_folder_path}/{file}")
-                        smb_client.upload_file(csv_path, new_folder_path, file)
+            csv_files = [f for f in os.listdir(measurement_dir) if f.lower().endswith(".csv")]
         except Exception as e:
-            print(f"Error uploading csv: {e}")
-            messagebox.showerror("SMB Error", f"Error uploading csv: {e}")
+            print(f"Error listing measurement folder: {e}")
+            traceback.print_exc()
+            return
 
-    def _convert_and_save_raw_files(self, smb_client, new_folder_path):
-        raw_files_folder = f"{new_folder_path}/raw files"
+        if not csv_files:
+            print("No CSV files found in the same folder as GIF/PNG.")
+            return
 
-        if self._create_new_folder(smb_client, new_folder_path, "raw files") is None:
+        print("CSV files to upload:")
+        for f in sorted(csv_files):
+            print("  -", f)
+
+        for file in sorted(csv_files):
+            local_path = os.path.join(measurement_dir, file)
+            try:
+                print(f"Uploading CSV: {local_path} → {remote_folder_path}/{file}")
+                smb_client.upload_file(local_path, remote_folder_path, file)
+            except Exception as e:
+                print(f"Error uploading CSV {file}: {e}")
+                messagebox.showerror("SMB Error", f"Error uploading CSV {file}: {e}")
+
+    def _convert_and_save_raw_files(self, smb_client, remote_folder_path):
+        raw_files_folder = self._join_smb(remote_folder_path, "raw files")
+
+        if self._create_new_folder(smb_client, remote_folder_path, "raw files") is None:
             return
 
         images_dict = getattr(self.camera_worker, "images_dict", None)
@@ -475,7 +495,6 @@ class AppWindow:
                 try:
                     timestamp = time.strftime("%Y%m%d_%H%M%S")
                     save_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "saved_data")
-                    print(f"save dir: {save_dir}")
                     os.makedirs(save_dir, exist_ok=True)
 
                     fig = self._get_figure()
@@ -494,24 +513,35 @@ class AppWindow:
                 messagebox.showerror("SMB Error", "Unable to connect to the SMB server. Check your settings.")
                 return
 
-            selected_directory = self._get_selected_directory(smb_client)
-            if not selected_directory:
+            cam_sn = getattr(self.camera_worker, "serial_number", None) or "UNKNOWN_CAM"
+            laser_sn = getattr(self.camera_worker, "serial", None)
+            laser_model = getattr(self.camera_worker, "model", None) or "UNKNOWN_MODEL"
+
+            print(f"CAM serial_number: {cam_sn} | LASER serial: {laser_sn} | LASER model: {laser_model}")
+
+            if not laser_sn:
+                messagebox.showerror("SMB Error", "Laser serial is empty. Turn ON Laser first (toggle laser).")
                 return
 
-            folder_name = f"M2 Data_{self.camera_worker.serial_number}_{self.camera_worker.model}"
-            new_folder_path = self._create_new_folder(smb_client, selected_directory, folder_name)
-            if not new_folder_path:
+            laser_parent_folder = self._find_folder_containing_laser_sn(smb_client, laser_sn)
+            if not laser_parent_folder:
+                messagebox.showerror("SMB Error", f"Could not find server folder containing laser_sn: {laser_sn}")
                 return
 
-            uploaded_files = self._upload_files(smb_client, new_folder_path)
+            test_folder_path = self._create_new_folder(smb_client, laser_parent_folder, "test")
+            if not test_folder_path:
+                messagebox.showerror("SMB Error", f"Could not create 'test' inside: {laser_parent_folder}")
+                return
+
+            uploaded_files = self._upload_files(smb_client, test_folder_path)
             if uploaded_files:
-                self._show_upload_success(new_folder_path, uploaded_files)
+                self._show_upload_success(test_folder_path, uploaded_files)
             else:
                 messagebox.showwarning("Warning", "Could not save any files.")
 
-            self._upload_txt_files(smb_client, new_folder_path)
-            self._upload_csv_file(smb_client, new_folder_path)
-            self._convert_and_save_raw_files(smb_client, new_folder_path)
+            self._upload_txt_files(smb_client, test_folder_path)
+            self._upload_csv_from_same_folder_as_gif_png(smb_client, test_folder_path)
+            self._convert_and_save_raw_files(smb_client, test_folder_path)
 
         except Exception as e:
             print(f"Error saving files to SMB: {e}")

@@ -188,7 +188,11 @@ class ExternalFileClient:
         try:
             with open(local_file_path, 'rb') as file_obj:
                 remote_file_name = remote_file_name or os.path.basename(local_file_path)
-                remote_path = os.path.join(remote_directory, remote_file_name)
+                # Normalize all paths to use forward slashes for SMB
+                remote_dir_normalized = str(remote_directory).replace("\\", "/").strip("/")
+                remote_file_normalized = str(remote_file_name).replace("\\", "/")
+                # Build remote path with forward slashes
+                remote_path = f"/{remote_dir_normalized}/{remote_file_normalized}"
                 self.conn.storeFile(self.shared_folder_name, remote_path, file_obj)
                 logger.info(f"File '{local_file_path}' uploaded to '{remote_path}'.")
         except Exception as e:

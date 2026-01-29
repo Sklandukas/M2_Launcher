@@ -58,10 +58,6 @@ class DevicesRunner:
                     if self._should_execute(last_connecting, reconnect_interval):
                         logger.info(f"Creating/reconnecting {device_name}")
                         last_connecting = time.time()
-                        # if not ping(device_ip):
-                        #     logger.warning(f"No {device_name} ({device_ip}) IP address available")
-                        #     setattr(global_devices, global_device_attr, None)
-                        # else:
                         with device_lock:
                             device_instance = device_class(SocketClient(device_ip, device_port))
                             setattr(global_devices, global_device_attr, device_instance)

@@ -418,20 +418,17 @@ class CameraWorker:
             dy_list.append(res.Dy_mm)
             z_list.append(z_val)
 
-        # tavo konversijos
         dx = np.array(dx_list, dtype=float) * 1e-3
         dy = np.array(dy_list, dtype=float) * 1e-3
         z  = np.array(z_list,  dtype=float) * 1e-3
         lam_m = self.wavelength * 1e-9
 
+        print(f"dx: {dx} dy: {dy}")
+
         (results, fig) = compute_m2_hyperbola(
             z, dx, dy, lam_m,
             metric="1e2_diameter",
             z_window=(70.0, 135.0),
-            use_huber=True,
-            reject_outliers=True,
-            reject_k=3.0,
-            max_passes=3,
             min_points=8,
             return_fig=True,
             units="mm",
@@ -458,7 +455,6 @@ class CameraWorker:
 
         self.show_figure()
 
-    # --------------------- FOCUS PROCESS ---------------------
     def find_focus_process(self):
         if not self.axis_connected or self.axis_controller is None:
             messagebox.showerror("Error", "First connect to the axis!")
@@ -476,7 +472,6 @@ class CameraWorker:
 
         def thread_fn():
             try:
-                # max_length iš json (palieku tavo metodą)
                 max_length = self.get_from_settings_json("length_of_runners")
                 step_size = 1587
 
@@ -510,7 +505,6 @@ class CameraWorker:
 
         Thread(target=thread_fn, daemon=True).start()
 
-    # --------------------- START / STOP MAIN MEASUREMENT ---------------------
     def start_process(self):
         if not self.axis_connected or self.axis_controller is None:
             messagebox.showerror("Error", "First connect to the axis!")
@@ -534,35 +528,32 @@ class CameraWorker:
             meta_df = None
 
             try:
-                # lazeris ON
                 self.toggle_laser()
 
-                # 1) fokusas (jei jau turi focus_position – gali praleisti; bet palieku kaip pilną)
                 max_length = self.get_from_settings_json("length_of_runners")
                 step_size = 1587
 
-                focus_steps = find_focus(
-                    axis_service=self.axis_service,
-                    capture_fn=lambda pos: self.measure.capture_image(pos),
-                    beam_fn=lambda img: beam_size_k4_fixed_axes(img, pixel_size_um=3.75, k=4.0),
-                    axis_no=0,
-                    max_position=max_length,
-                    step_size=step_size,
-                    stop_event=self.stop_event
-                )
+                # focus_steps = find_focus(
+                #     axis_service=self.axis_service,
+                #     capture_fn=lambda pos: self.measure.capture_image(pos),
+                #     beam_fn=lambda img: beam_size_k4_fixed_axes(img, pixel_size_um=3.75, k=4.0),
+                #     axis_no=0,
+                #     max_position=max_length,
+                #     step_size=step_size,
+                #     stop_event=self.stop_event
+                # )
 
                 if self.stop_requested or self.stop_event.is_set():
                     self._ui_status("Proceedings suspended")
                     return
 
-                if focus_steps is None:
-                    self._ui_status("Focus not found")
-                    return
+                # if focus_steps is None:
+                #     self._ui_status("Focus not found")
+                #     return
 
-                best_focus_mm = float(focus_steps) / step_size
-                change_val("focus_position", best_focus_mm / 2.0)
+                # best_focus_mm = float(focus_steps) / step_size
+                # change_val("focus_position", best_focus_mm / 2.0)
 
-                # 2) track scan
                 focus_point = self.get_from_settings_json("focus_position")  # mm (pas tave)
                 focus_steps_for_track = focus_point * 2  # palieku tavo logiką
 
@@ -588,11 +579,9 @@ class CameraWorker:
                         pass
                     return
 
-                # 3) go home (thread)
                 go_home_thread = Thread(target=lambda: self.axis_service.home(0), daemon=True)
                 go_home_thread.start()
 
-                # 4) lygiagrečiai: GIF
                 gif_result = {"path": None}
 
                 def gif_job():
@@ -604,7 +593,11 @@ class CameraWorker:
                 # 5) M²
                 if self.wavelength is None:
                     raise RuntimeError("Wavelength is None (laser info not parsed).")
+                
+                for x in dx_list:
+                    print(f"dx: {x}")
 
+                    
                 results, fig = self.measure.compute_m2(
                     z_list, dx_list, dy_list,
                     wavelength_nm=self.wavelength,
@@ -615,12 +608,10 @@ class CameraWorker:
 
                 self.measurement_figure = fig
 
-                # 6) save fig + txt
                 if fig is not None:
                     self.storage.save_figure_png(folder_name, fig, self.serial, self.model)
                     self.storage.save_m2_txt(folder_name, z_list, dx_list, dy_list)
 
-                # 7) wait gif
                 gif_thread.join()
                 go_home_thread.join()
 
@@ -628,7 +619,6 @@ class CameraWorker:
                 if self.gif_path:
                     self.storage.store_gif(self.gif_path)
 
-                # 8) UI enable
                 if self.figure_button and self.measurement_figure is not None:
                     ui_call(self.figure_button, lambda: self.figure_button.config(state=tk.NORMAL))
                 if self.gif_button and self.gif_path is not None:
@@ -636,7 +626,6 @@ class CameraWorker:
                 if self.save_data_button:
                     ui_call(self.save_data_button, lambda: self.save_data_button.config(state=tk.NORMAL))
 
-                # rodyk figūrą by default
                 if self.measurement_figure is not None:
                     ui_call(self.camera_label, self.show_figure)
 
@@ -652,7 +641,6 @@ class CameraWorker:
                 self.process_running = False
                 self._ui_buttons_running(False)
 
-                # meta csv jei yra
                 try:
                     if folder_name and meta_df is not None and not meta_df.empty:
                         meta_df.to_csv(os.path.join(folder_name, f"{folder_name}_meta_data.csv"), index=False)
@@ -769,7 +757,6 @@ class CameraWorker:
             traceback.print_exc()
             messagebox.showerror("Photo Error", f"Klaida darant nuotrauką:\n{e}")
 
-    # --------------------- SAVE DATA (export) ---------------------
     def save_data(self):
         try:
             has_gif = self.gif_path is not None
@@ -785,7 +772,6 @@ class CameraWorker:
             else:
                 original_name = f"measurement_{time.strftime('%Y%m%d_%H%M%S')}"
 
-            # jei gif kelias pasikeitęs
             if has_gif and not os.path.exists(self.gif_path):
                 alt = os.path.join(os.getcwd(), os.path.basename(self.gif_path))
                 if os.path.exists(alt):
@@ -817,7 +803,6 @@ class CameraWorker:
             traceback.print_exc()
             messagebox.showerror("Error", f"Failed to save data: {e}")
 
-    # --------------------- settings.json helpers ---------------------
     def get_from_settings_json(self, key: str):
         """
         Skaito config/setting.json -> CameraDefaultSettings
@@ -828,6 +813,4 @@ class CameraWorker:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        # jei setting.json turi kitą struktūrą – pakoreguok čia
-        # pas tave buvo: data["CameraDefaultSettings"][string]
         return data["CameraDefaultSettings"][key]

@@ -6,7 +6,7 @@ import pandas as pd
 
 from threading import Thread
 from storage.converter import _save_data
-from measurement.calculations import beam_size_k4_fixed_axes
+from measurement.calculations import beam_size_iso11146_vendorlike
 from measurement.quadrometer import compute_m2_hyperbola
 from measurement.focus import generate_track_by_focus
 from devices.camera.camera_service import SimpleCameraCapture
@@ -23,7 +23,19 @@ class MeasurementService:
         )
 
     def beam(self, img):
-        return beam_size_k4_fixed_axes(img, pixel_size_um=3.75, k=4.0)
+        return beam_size_iso11146_vendorlike(img, 
+                                             pixel_size_x_um=3.75, 
+                                             pixel_size_y_um=3.75, 
+                                             k = 4.0, 
+                                             border_px=30,
+                                             border_frac_min=0.08,
+                                             max_iters=40,
+                                             rel_tol=1e-7,
+                                             pixel_center=True,
+                                             bg_mode="plane",
+                                             bg_stat="median",
+                                             noise_nsigma=None,
+                                             ignore_saturated=False)
 
     def capture_save_measure(self, position, filename, raw_dir, pgm_dir):
         img = self.capture_image(position)
@@ -110,10 +122,6 @@ class MeasurementService:
             z, dx, dy, lam,
             metric="1e2_diameter",
             z_window=(70.0, 135.0),
-            use_huber=True,
-            reject_outliers=True,
-            reject_k=3.0,
-            max_passes=3,
             min_points=8,
             return_fig=True,
             units="mm",

@@ -69,7 +69,7 @@ class ErpNextApi:
         else:
             logger.error(f"Error retrieving data: {response.status_code}, {response.text}")
     
-    def upload_file(self, form_payload):
+    def  inte(self, form_payload):
         url = f"{self.base_url}/api/method/uploadfile"
         self.session.headers.update({'Content-Type': 'application/x-www-form-urlencoded'})
         response = self.session.post(url, data=form_payload)

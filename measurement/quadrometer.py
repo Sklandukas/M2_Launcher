@@ -1,268 +1,187 @@
 import numpy as np
 import math
-import matplotlib.ticker as ticker
 import matplotlib.pyplot as plt
+from scipy.optimize import least_squares
+
 
 def compute_m2_hyperbola(
     z, dx, dy, wavelength, *,
-    metric="1e2_diameter",      
-    z_window=None,              
-    use_huber=True,             
-    max_iter=50,                
-    reject_outliers=False,      
-    reject_k=3.0,               
-    max_passes=3,               
-    min_points=6,               
-    return_fig=False, units="mm", title=None, figsize=(12,7), dpi=120
+    metric="d4sigma_diameter",
+    z_window=None,          
+    max_iter=8000,
+    min_points=8,
+    return_fig=False,
+    units="mm",
+    title=None,
+    figsize=(12, 7),
+    dpi=120,
 ):
 
-    def _to_1e2_diameter(d, metric):
-        d = np.asarray(d, float)
-        m = str(metric).lower()
-        if m == "1e2_diameter": return d
-        if m == "1e2_radius":   return 2.0*d
-        k = 2.0/np.sqrt(2.0*np.log(2.0))
-        if m == "fwhm_diameter": return k*d
-        if m == "fwhm_radius":   return k*(2.0*d)
-        raise ValueError("metric must be: 1e2_diameter | 1e2_radius | fwhm_diameter | fwhm_radius")
+    def snap_m2_to_one(m2: float, *, decimals: int = 3, lo: float = 0.990, hi: float = 1.000) -> float:
+        if not np.isfinite(m2):
+            return m2
+        m2r = round(float(m2), int(decimals))
+        return 1.0 if (lo <= m2r <= hi) else float(m2)
 
-    def _huber_weights(r, delta):
-        w = np.ones_like(r)
-        big = np.abs(r) > delta
-        w[big] = delta / (np.abs(r[big]) + 1e-12)
-        return w
+    def _model_d4sigma(zv: np.ndarray, d0: float, z0: float, M2: float, lam_mm: float) -> np.ndarray:
+        a = (M2 * lam_mm) / (math.pi * d0)
+        d2 = (d0 * d0) + 16.0 * (a * a) * (zv - z0) * (zv - z0)
+        return np.sqrt(np.maximum(d2, 0.0))
 
-    def _mad(x):
-        med = np.median(x)
-        return np.median(np.abs(x - med)) + 1e-12
+    def fit_m2_from_d4sigma_NOFILTER(z_mm: np.ndarray, d_mm: np.ndarray, lam_mm: float) -> dict:
+        zloc = np.asarray(z_mm, dtype=float).ravel()
+        dloc = np.asarray(d_mm, dtype=float).ravel()
 
-    def _init_from_parabola(zz, ww):
-        i0 = int(np.argmin(ww))
-        z0 = float(zz[i0])
-        w0_min = float(ww[i0])
+        if zloc.size < int(min_points):
+            return {"ok": 0.0, "M2": float("nan"), "z0": float("nan"), "d0": float("nan"), "rmse_mm": float("nan")}
 
-        t = (zz - z0)**2
-        y = ww*ww
-        A = np.column_stack([t, np.ones_like(t)])
-        coef, *_ = np.linalg.lstsq(A, y, rcond=None)   
-        a_lin = float(coef[0])     
-        b_lin = float(coef[1])     
 
-        a_lin = max(a_lin, 1e-18)
-        b_lin = max(b_lin, max(1e-18, 0.5*w0_min*w0_min))
+        dpos = dloc[np.isfinite(dloc) & (dloc > 0)]
+        zfin = zloc[np.isfinite(zloc)]
+        if dpos.size == 0 or zfin.size == 0:
+            return {"ok": 0.0, "M2": float("nan"), "z0": float("nan"), "d0": float("nan"), "rmse_mm": float("nan")}
 
-        theta = float(np.sqrt(a_lin))
-        w0    = float(np.sqrt(b_lin))
-        return w0, theta, z0
+        d0_0 = float(max(np.min(dpos), 1e-12))
+        ok_seed = np.isfinite(zloc) & np.isfinite(dloc) & (dloc > 0)
+        i0 = int(np.argmin(np.where(ok_seed, dloc, np.inf)))
+        z0_0 = float(zloc[i0]) if np.isfinite(zloc[i0]) else float(np.median(zfin))
 
-    def _fit_gn(zz, ww):
-        w0, theta, z0 = _init_from_parabola(zz, ww)
-        if not (np.isfinite(w0) and np.isfinite(theta) and np.isfinite(z0)):
-            return (np.nan, np.nan, np.nan, None)
+        z_seed = zloc[ok_seed]
+        d_seed = dloc[ok_seed]
+        if z_seed.size < 2:
+            z_seed = zfin
+            d_seed = dpos if dpos.size == zfin.size else np.full_like(zfin, d0_0)
 
-        for _ in range(max_iter):
-            t = zz - z0
-            model = np.sqrt(np.maximum(w0*w0 + (theta*theta)*(t*t), 1e-24))
-            r = ww - model
+        left = max(1, int(0.15 * z_seed.size))
+        right = max(1, int(0.15 * z_seed.size))
+        idxs = np.r_[np.arange(0, left), np.arange(z_seed.size - right, z_seed.size)]
+        idxs = np.unique(idxs)
+        if idxs.size < 2:
+            idxs = np.arange(z_seed.size)
 
-            if use_huber:
-                delta = 1.345 * _mad(r)
-                wgt = _huber_weights(r, delta)
-            else:
-                wgt = np.ones_like(r)
+        zz = z_seed[idxs]
+        dd = d_seed[idxs]
+        denom = np.maximum(np.abs(zz - z0_0), 1e-6)
+        slope = float(np.median(dd / denom))
+        M2_0 = float(max(slope * math.pi * d0_0 / (4.0 * lam_mm), 0.8))
 
-            J = np.column_stack([
-                w0 / model,                 
-                (theta * t*t) / model,      
-                -(theta*theta * t) / model  
-            ])
-            W = np.sqrt(wgt)[:, None]
-            JW = J * W
-            rW = (r[:, None]) * W
+        p0 = np.array([math.log(d0_0), z0_0, math.log(M2_0)], dtype=float)
 
-            A = JW.T @ JW
-            bvec = JW.T @ rW
+        def model_d(zv: np.ndarray, p: np.ndarray) -> np.ndarray:
+            d0 = float(np.exp(p[0]))
+            z0 = float(p[1])
+            M2 = float(np.exp(p[2]))
+            return _model_d4sigma(zv, d0, z0, M2, lam_mm)
 
-            lam_reg = 1e-12 * (np.trace(A) + 1e-24)
-            A = A + lam_reg * np.eye(3)
+        def resid(p: np.ndarray) -> np.ndarray:
+            dfit = model_d(zloc, p)
+            r = dfit - dloc
 
-            try:
-                dp = np.linalg.solve(A, bvec).ravel()
-            except np.linalg.LinAlgError:
-                break
+            bad = (~np.isfinite(zloc)) | (~np.isfinite(dloc)) | (dloc <= 0)
+            r = np.where(bad, 0.0, r)
 
-            w0   += dp[0]
-            theta += dp[1]
-            z0   += dp[2]
-            w0    = float(max(w0, 1e-12))
-            theta = float(max(theta, 1e-12))
+            r = np.where(np.isfinite(r), r, 0.0)
+            return r
 
-            if np.linalg.norm(dp) < 1e-12:
-                break
-
-        t = zz - z0
-        model = np.sqrt(np.maximum(w0*w0 + (theta*theta)*(t*t), 1e-24))
-        r = ww - model
-        return (float(w0), float(theta), float(z0), r)
-
-    def _fit_one_axis(z_full, d_full, wavelength, z_window):
-        d_1e2 = _to_1e2_diameter(d_full, metric)
-        w_full = 0.5 * d_1e2
-
-        z_full = np.asarray(z_full, float).ravel()
-        w_full = np.asarray(w_full, float).ravel()
-        m = np.isfinite(z_full) & np.isfinite(w_full)
-        z_full = z_full[m]; w_full = w_full[m]
-        idx = np.argsort(z_full)
-        z_full = z_full[idx]; w_full = w_full[idx]
-
-        if z_window is not None:
-            zlo, zhi = map(float, z_window)
-            base_mask = (z_full >= zlo) & (z_full <= zhi)
-            if base_mask.sum() >= 5:
-                z_use = z_full[base_mask]; w_use = w_full[base_mask]
-            else:
-                z_use = z_full; w_use = w_full
-                base_mask = np.ones_like(z_full, dtype=bool)
+        d_valid = dloc[np.isfinite(dloc) & (dloc > 0)]
+        if d_valid.size == 0:
+            scale = 1.0
         else:
-            z_use = z_full; w_use = w_full
-            base_mask = np.ones_like(z_full, dtype=bool)
+            scale = float(np.median(np.abs(d_valid - np.median(d_valid))))
+            if not np.isfinite(scale) or scale <= 0:
+                scale = 1.0
 
-        if z_use.size < 3:
-            return dict(M2=np.nan, w0=np.nan, z0=np.nan, theta=np.nan,
-                        z_used=z_use, w_used=w_use, z_all=z_full, w_all=w_full,
-                        mask_used=np.zeros_like(z_full, bool),
-                        mask_outliers=np.zeros_like(z_full, bool),
-                        coeffs=(np.nan,)*3)
+        res = least_squares(resid, p0, loss="huber", f_scale=scale, max_nfev=int(max_iter))
 
-        keep = np.ones_like(z_use, dtype=bool)
-        passes = 1 if not reject_outliers else max_passes
-        for _ in range(passes):
-            if keep.sum() < 3:
-                break
-            w0, theta, z0, r = _fit_gn(z_use[keep], w_use[keep])
-            if not np.isfinite(w0):
-                break
-            if not reject_outliers:
-                break
-            mad = _mad(r)
-            bad_local = np.abs(r) > (reject_k * mad)
-            if not np.any(bad_local):
-                break
-            pos = np.where(keep)[0]
-            keep[pos[bad_local]] = False
-            if keep.sum() < max(min_points, 3):
-                break
+        d0 = float(np.exp(res.x[0]))
+        z0 = float(res.x[1])
+        M2 = float(np.exp(res.x[2]))
 
-        if keep.sum() >= 3:
-            w0, theta, z0, r = _fit_gn(z_use[keep], w_use[keep])
-            M2 = (np.pi * w0 / float(wavelength)) * theta
-            a = theta*theta
-            b = -2.0*a*z0
-            c = w0*w0 + a*z0*z0
+        # RMSE skaičiuojam tik ten, kur d valid (kitaip RMSE būtų NaN)
+        valid = np.isfinite(zloc) & np.isfinite(dloc) & (dloc > 0)
+        if np.any(valid):
+            d_fit = model_d(zloc[valid], res.x)
+            rmse = float(np.sqrt(np.mean((d_fit - dloc[valid]) ** 2)))
         else:
-            w0 = theta = z0 = M2 = a = b = c = np.nan
+            rmse = float("nan")
 
-        mask_used_all = np.zeros_like(z_full, dtype=bool)
-        mask_out_all  = np.zeros_like(z_full, dtype=bool)
-        mask_used_all[np.where(base_mask)[0]] = False
-        mask_out_all[np.where(base_mask)[0]]  = False
-        if z_use.size > 0:
-            mask_used_all[np.where(base_mask)[0]] = keep
-            mask_out_all[np.where(base_mask)[0]]  = ~keep
+        return {"ok": 1.0, "M2": M2, "z0": z0, "d0": d0, "rmse_mm": rmse}
 
-        return dict(M2=float(M2), w0=float(w0), z0=float(z0), theta=float(theta),
-                    z_used=z_use[keep] if np.any(keep) else z_use,
-                    w_used=w_use[keep] if np.any(keep) else w_use,
-                    z_all=z_full, w_all=w_full,
-                    mask_used=mask_used_all, mask_outliers=mask_out_all,
-                    coeffs=(float(a), float(b), float(c)))
-
+    # --- vienetai ---
     z = np.asarray(z, float).ravel()
     dx = np.asarray(dx, float).ravel()
     dy = np.asarray(dy, float).ravel()
-    wavelength = float(wavelength)
 
-    res_x = _fit_one_axis(z, dx, wavelength, z_window)
-    res_y = _fit_one_axis(z, dy, wavelength, z_window)
-    results = {"x": res_x, "y": res_y}
+    u = str(units).lower()
+    if u == "mm":
+        z_mm, dx_mm, dy_mm = z, dx, dy
+    elif u == "m":
+        z_mm, dx_mm, dy_mm = z * 1e3, dx * 1e3, dy * 1e3
+    elif u in ("um", "µm"):
+        z_mm, dx_mm, dy_mm = z / 1e3, dx / 1e3, dy / 1e3
+    else:
+        z_mm, dx_mm, dy_mm = z, dx, dy
+
+    # metric radius->diameter (jei paduodamas radius)
+    m = str(metric).lower()
+    if m in ("d4sigma_radius", "4sigma_radius", "iso11146_radius", "1e2_radius", "fwhm_radius"):
+        dx_mm = 2.0 * dx_mm
+        dy_mm = 2.0 * dy_mm
+
+    # === JOKIO z_window ir jokio ok masko čia nebetaikom ===
+    ok_mask = np.ones_like(z_mm, dtype=bool)
+
+    lam_mm = float(wavelength) * 1e3  # wavelength ateina metrais
+
+    # --- FIT ant VISŲ taškų ---
+    m2x = fit_m2_from_d4sigma_NOFILTER(z_mm, dx_mm, lam_mm)
+    m2y = fit_m2_from_d4sigma_NOFILTER(z_mm, dy_mm, lam_mm)
+    dstar = np.sqrt(np.maximum(dx_mm, 0.0) * np.maximum(dy_mm, 0.0))  # apsauga tik nuo sqrt(neg)
+    m2s = fit_m2_from_d4sigma_NOFILTER(z_mm, dstar, lam_mm)
+
+    m2x["M2"] = snap_m2_to_one(float(m2x["M2"]))
+    m2y["M2"] = snap_m2_to_one(float(m2y["M2"]))
+    m2s["M2"] = snap_m2_to_one(float(m2s["M2"]))
+
+    results = {"x": m2x, "y": m2y, "star": m2s, "ok_mask": ok_mask}
 
     if not return_fig:
         return results
 
-    def _to_mm(v):
-        u = str(units).lower()
-        if u == "m":  return v
-        if u == "mm": return v
-        if u in ("um","µm"): return v
-        return v
+    # --- plot (rodom VISUS taškus) ---
+    # z_fit darom tik iš finite z, kad linspace negautų NaN
+    z_fin = z_mm[np.isfinite(z_mm)]
+    if z_fin.size == 0:
+        z_fit = np.linspace(0.0, 1.0, 500)
+    else:
+        z_fit = np.linspace(float(np.min(z_fin)), float(np.max(z_fin)), 500)
 
-    def _to_um(v):
-        u = str(units).lower()
-        if u == "m":  return v*1e6
-        if u == "mm": return v*1e3
-        if u in ("um","µm"): return v
-        return v*1e3
+    X_fit = _model_d4sigma(z_fit, float(m2x["d0"]), float(m2x["z0"]), float(m2x["M2"]), lam_mm)
+    Y_fit = _model_d4sigma(z_fit, float(m2y["d0"]), float(m2y["z0"]), float(m2y["M2"]), lam_mm)
 
-    wx_all = 0.5 * _to_1e2_diameter(dx, metric)
-    wy_all = 0.5 * _to_1e2_diameter(dy, metric)
+    wx_um = 0.5 * dx_mm * 1000.0
+    wy_um = 0.5 * dy_mm * 1000.0
+    wx_fit_um = 0.5 * X_fit * 1000.0
+    wy_fit_um = 0.5 * Y_fit * 1000.0
 
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    ax.plot(z_mm, wx_um, "s", mfc="none", mec="tab:blue", mew=1.5, label="Waist Width (all)")
+    ax.plot(z_mm, wy_um, "s", mfc="none", mec="tab:red",  mew=1.5, label="Waist Height (all)")
+    ax.plot(z_fit, wx_fit_um, color="tab:blue", lw=2, label="Fit Width")
+    ax.plot(z_fit, wy_fit_um, color="tab:red",  lw=2, label="Fit Height")
 
-    zx_all = results["x"]["z_all"]; use_x = results["x"]["mask_used"]; out_x = results["x"]["mask_outliers"]
-    zy_all = results["y"]["z_all"]; use_y = results["y"]["mask_used"]; out_y = results["y"]["mask_outliers"]
-
-    ax.plot(_to_mm(zx_all) * 1000, _to_um(wx_all),
-            's', mfc='none', mec='tab:blue', label='Width')
-    ax.plot(_to_mm(zy_all) * 1000, _to_um(wy_all),
-            's', mfc='none', mec='tab:red', label='Height')
-        
-    aX, bX, cX = results["x"]["coeffs"]
-    aY, bY, cY = results["y"]["coeffs"]
-
-    if np.isfinite(aX):
-        z_fit = np.linspace(zx_all.min(), zx_all.max(), 500)
-        wx_fit = np.sqrt(np.maximum(aX*z_fit**2 + bX*z_fit + cX, 0.0))
-        ax.plot(_to_mm(z_fit) * 1000, _to_um(wx_fit),
-                color='tab:blue', lw=2, label='Fit Width')
-    if np.isfinite(aY):
-        z_fit = np.linspace(zy_all.min(), zy_all.max(), 500)
-        wy_fit = np.sqrt(np.maximum(aY*z_fit**2 + bY*z_fit + cY, 0.0))
-        ax.plot(_to_mm(z_fit) * 1000, _to_um(wy_fit),
-                color='tab:red', lw=2, label='Fit Height')
-        
-    ax.set_xlabel(f"Distance, {units}")
+    ax.set_xlabel("Distance, mm")
     ax.set_ylabel("Beam Waist Radius, µm")
     if title:
         ax.set_title(title)
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc='best')
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="lower left")
 
-    ax.xaxis.set_major_locator(ticker.MultipleLocator(10))  
-    ax.set_xlim(left=0)
-
-    u = str(units).lower()
-    if u == "mm":
-        ax.yaxis.set_major_locator(ticker.MultipleLocator(0.05))
-        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f"{y*1000:.0f}"))
-    elif u == "m":
-        ax.yaxis.set_major_locator(ticker.MultipleLocator(5e-5))
-        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f"{y*1e6:.0f}"))
-    elif u in ("um", "µm"):
-        ax.yaxis.set_major_locator(ticker.MultipleLocator(50))
-        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f"{y:.0f}"))
-
-    if title: ax.set_title(title)
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc='lower right', framealpha=0.9)
-
-    M2x, M2y = results["x"]["M2"], results["y"]["M2"]
-    M2star = np.sqrt(M2x*M2y) if np.isfinite(M2x) and np.isfinite(M2y) else np.nan
-    txt = (f"M2 x:    {M2x:.2f}\n"
-           f"M2 y:    {M2y:.2f}\n"
-           f"M2*:     {M2star:.2f}")
-    ax.text(0.02, 0.98, txt, transform=ax.transAxes, va='top',
-            bbox=dict(facecolor='white', alpha=0.85, boxstyle='round'), fontsize=12)
+    txt = f"M2 x:    {float(m2x['M2']):.2f}\nM2 y:    {float(m2y['M2']):.2f}\nM2*:     {float(m2s['M2']):.2f}"
+    ax.text(
+        0.05, 0.75, txt, transform=ax.transAxes,
+        bbox=dict(facecolor="white", alpha=0.85, boxstyle="round")
+    )
 
     fig.tight_layout()
     return results, fig
