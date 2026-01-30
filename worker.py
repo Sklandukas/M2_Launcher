@@ -532,27 +532,35 @@ class CameraWorker:
 
                 max_length = self.get_from_settings_json("length_of_runners")
                 step_size = 1587
+                a1 = time.time()
+                f1 = time.time()
 
-                # focus_steps = find_focus(
-                #     axis_service=self.axis_service,
-                #     capture_fn=lambda pos: self.measure.capture_image(pos),
-                #     beam_fn=lambda img: beam_size_k4_fixed_axes(img, pixel_size_um=3.75, k=4.0),
-                #     axis_no=0,
-                #     max_position=max_length,
-                #     step_size=step_size,
-                #     stop_event=self.stop_event
-                # )
+                focus_steps = find_focus(
+                    axis_service=self.axis_service,
+                    capture_fn=lambda pos: self.measure.capture_image(pos),
+                    beam_fn=lambda img: beam_size_k4_fixed_axes(img, pixel_size_um=3.75, k=4.0),
+                    axis_no=0,
+                    max_position=max_length,
+                    step_size=step_size,
+                    stop_event=self.stop_event
+                )
+
+                f2 = time.time()
+
+                print(f"Focus search time: {f2 - f1:.2f} seconds")
+
+                m1 = time.time()
 
                 if self.stop_requested or self.stop_event.is_set():
                     self._ui_status("Proceedings suspended")
                     return
 
-                # if focus_steps is None:
-                #     self._ui_status("Focus not found")
-                #     return
+                if focus_steps is None:
+                    self._ui_status("Focus not found")
+                    return
 
-                # best_focus_mm = float(focus_steps) / step_size
-                # change_val("focus_position", best_focus_mm / 2.0)
+                best_focus_mm = float(focus_steps) / step_size
+                change_val("focus_position", best_focus_mm / 2.0)
 
                 focus_point = self.get_from_settings_json("focus_position")  # mm (pas tave)
                 focus_steps_for_track = focus_point * 2  # palieku tavo logiką
@@ -631,6 +639,10 @@ class CameraWorker:
 
                 self._ui_status("The process is complete")
 
+                m2 = time.time()
+                print(f"M² computation time: {m2 - m1:.2f} seconds")
+
+
             except Exception as e:
                 traceback.print_exc()
                 self._ui_status(f"Error: {e}")
@@ -646,6 +658,9 @@ class CameraWorker:
                         meta_df.to_csv(os.path.join(folder_name, f"{folder_name}_meta_data.csv"), index=False)
                 except Exception:
                     pass
+            
+            a2 = time.time()
+            print(f"Total process time: {a2 - a1:.2f} seconds")
 
         Thread(target=thread_fn, daemon=True).start()
 
@@ -683,7 +698,6 @@ class CameraWorker:
 
         Thread(target=thread_fn, daemon=True).start()
 
-    # --------------------- TEST AXIS ---------------------
     def test_axis(self):
         def thread_fn():
             try:

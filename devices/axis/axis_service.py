@@ -218,10 +218,6 @@ class AxisController(DeviceInterface):
     # Position / motion
     # -------------------------
     def get_position(self, axis_no: int, timeout_s: float = 3.0, poll_s: float = 0.05) -> int:
-        """
-        Skaito poziciją. Jei kontroleris grąžina BUSY, laukia iki timeout.
-        Iš atsakymo ištraukia pirmą sveiką skaičių.
-        """
         t0 = time.time()
 
         while True:
@@ -232,6 +228,7 @@ class AxisController(DeviceInterface):
 
             if resp.upper() == "BUSY":
                 if (time.time() - t0) >= timeout_s:
+                    print(f"timeout_s: {timeout_s}")
                     raise Exception("Timeout waiting for position (controller keeps returning BUSY)")
                 time.sleep(poll_s)
                 continue
@@ -255,13 +252,7 @@ class AxisController(DeviceInterface):
             return True
 
     def go_to_position(self, axis_no: int, position: int, need_wait_for_axis_in_position: bool = False):
-        """
-        Nuvažiuoja į position. Jei need_wait_for_axis_in_position=True – laukia kol pasieks.
-        """
-        print("gotopositiontest")
-
-        # Mažas delay prieš darbą (jei reikia “susistovėjimui”)
-        time.sleep(0.2)
+        time.sleep(0.1)
 
         if self.need_initialize_axis(axis_no):
             self._go_home(axis_no)
@@ -270,9 +261,6 @@ class AxisController(DeviceInterface):
             if current_position != 0:
                 raise Exception("Failed to go home")
 
-        time.sleep(0.1)
-
-        # Siunčiam komandą judėti
         response = self.send_query(AxisControllerCommands.go_to_position(axis_no, position), 1)
         AxisControllerParser.parse_error_message(response)
 
@@ -282,10 +270,6 @@ class AxisController(DeviceInterface):
         if not need_wait_for_axis_in_position:
             return
 
-        # Palaukiam kol pradės judėti
-        time.sleep(0.2)
-
-        # Laukiam kol pasieks tikslą, su apsauga nuo “užstrigimo”
         last_position = None
         same_count = 0
 
@@ -303,9 +287,6 @@ class AxisController(DeviceInterface):
                 same_count = 0
 
             last_position = current_position
-            time.sleep(0.1)
-
-        sleep(0.1)
 
     # -------------------------
     # Saturation

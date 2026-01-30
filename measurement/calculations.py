@@ -490,7 +490,6 @@ def beam_size_k4_fixed_axes(
 
     print(f"Dx_mm: {Dx_mm} Dy_mm: {Dy_mm}")
 
-    # C matrica mm^2 (naudinga jei vėliau norėsi fixed-axes X/Y kaip dideliam kode)
     C_px = np.array([[float(m["Mxx"]), float(m["Mxy"])],
                      [float(m["Mxy"]), float(m["Myy"])]], dtype=np.float64)
     S = np.diag([px_mm, px_mm])
@@ -509,7 +508,6 @@ def beam_size_k4_fixed_axes(
         "peak_val": float(peak_val),
         **bg_info,
     }
-
     return BeamAxesResult(float(Dx_mm), float(Dy_mm), info)
 
 @dataclass
