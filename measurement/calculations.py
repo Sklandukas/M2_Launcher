@@ -488,7 +488,7 @@ def beam_size_k4_fixed_axes(
     Dx_mm = 4.0 * np.sqrt(max(float(m["Mxx"]), 0.0)) * px_mm
     Dy_mm = 4.0 * np.sqrt(max(float(m["Myy"]), 0.0)) * px_mm
 
-    print(f"Dx_mm: {Dx_mm} Dy_mm: {Dy_mm}")
+    # print(f"Dx_mm: {Dx_mm} Dy_mm: {Dy_mm}")
 
     C_px = np.array([[float(m["Mxx"]), float(m["Mxy"])],
                      [float(m["Mxy"]), float(m["Myy"])]], dtype=np.float64)

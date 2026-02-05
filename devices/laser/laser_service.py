@@ -32,7 +32,6 @@ class LaserService:
     def turn_on(self):
         if self.laser_on:
             return
-
         self.ctrl.set_laser_power()
         self.ctrl.set_laser_on()
         self.laser_on = True

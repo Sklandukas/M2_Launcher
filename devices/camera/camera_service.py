@@ -12,7 +12,7 @@ class CameraService:
         self.cam = None
 
     def start(self):
-        try:
+        try:  
             self.system = PySpin.System.GetInstance()
             self.cam_list = self.system.GetCameras()
             num = self.cam_list.GetSize()
@@ -65,7 +65,6 @@ class CameraService:
 
             self.cam = selected
 
-            # deinit kitų kamerų
             for i in range(num):
                 cam = self.cam_list.GetByIndex(i)
                 if cam == self.cam:
@@ -121,7 +120,6 @@ class CameraService:
         except Exception:
             pass
         self.system = None
-
 class SimpleCameraCapture:
     def __init__(self, cam=None):
         self.cam = cam

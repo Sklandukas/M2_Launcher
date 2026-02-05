@@ -66,8 +66,8 @@ def _save_data(self, raw_dir, pgm_dir, image, base_name, position_int: int, scal
             f.write(f"P5\n{w} {h}\n{maxval}\n".encode('ascii'))
             f.write(np.ascontiguousarray(data).tobytes())
 
-        print(f"[OK] RAW: {raw_path} ({raw_path.stat().st_size} B)")
-        print(f"[OK] PGM: {pgm_path} ({pgm_path.stat().st_size} B)")
+        # print(f"[OK] RAW: {raw_path} ({raw_path.stat().st_size} B)")
+        # print(f"[OK] PGM: {pgm_path} ({pgm_path.stat().st_size} B)")
         return str(raw_path), str(pgm_path)
 
     except Exception:

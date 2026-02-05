@@ -3,6 +3,7 @@ import time
 import traceback
 import matplotlib.pyplot as plt
 import numpy as np
+import cv2
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -488,6 +489,21 @@ class AppWindow:
             "Upload Successful",
             f"Files were uploaded to:\n{folder_path}\n\nUploaded:\n{files_text}"
         )
+
+    def save_current_frame(self):
+        """Save the latest live frame to PNG (debug helper)."""
+        try:
+            if self.latest_frame is not None:
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                filename = f"frame_{timestamp}.png"
+                cv2.imwrite(filename, self.latest_frame)
+                print(f"Saved frame: {filename}")
+            else:
+                print("No frame to save (latest_frame is None).")
+        except Exception as ex:
+            print(f"Error saving frame: {ex}")
+            print(f"Error details: {traceback.format_exc()}")
+
 
     def save_to_smb(self):
         try:

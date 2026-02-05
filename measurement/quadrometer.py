@@ -97,7 +97,6 @@ def compute_m2_hyperbola(
         z0 = float(res.x[1])
         M2 = float(np.exp(res.x[2]))
 
-        # RMSE skaičiuojam tik ten, kur d valid (kitaip RMSE būtų NaN)
         valid = np.isfinite(zloc) & np.isfinite(dloc) & (dloc > 0)
         if np.any(valid):
             d_fit = model_d(zloc[valid], res.x)
@@ -107,7 +106,6 @@ def compute_m2_hyperbola(
 
         return {"ok": 1.0, "M2": M2, "z0": z0, "d0": d0, "rmse_mm": rmse}
 
-    # --- vienetai ---
     z = np.asarray(z, float).ravel()
     dx = np.asarray(dx, float).ravel()
     dy = np.asarray(dy, float).ravel()
@@ -122,21 +120,18 @@ def compute_m2_hyperbola(
     else:
         z_mm, dx_mm, dy_mm = z, dx, dy
 
-    # metric radius->diameter (jei paduodamas radius)
     m = str(metric).lower()
     if m in ("d4sigma_radius", "4sigma_radius", "iso11146_radius", "1e2_radius", "fwhm_radius"):
         dx_mm = 2.0 * dx_mm
         dy_mm = 2.0 * dy_mm
 
-    # === JOKIO z_window ir jokio ok masko čia nebetaikom ===
     ok_mask = np.ones_like(z_mm, dtype=bool)
 
-    lam_mm = float(wavelength) * 1e3  # wavelength ateina metrais
+    lam_mm = float(wavelength) * 1e3  
 
-    # --- FIT ant VISŲ taškų ---
     m2x = fit_m2_from_d4sigma_NOFILTER(z_mm, dx_mm, lam_mm)
     m2y = fit_m2_from_d4sigma_NOFILTER(z_mm, dy_mm, lam_mm)
-    dstar = np.sqrt(np.maximum(dx_mm, 0.0) * np.maximum(dy_mm, 0.0))  # apsauga tik nuo sqrt(neg)
+    dstar = np.sqrt(np.maximum(dx_mm, 0.0) * np.maximum(dy_mm, 0.0))  
     m2s = fit_m2_from_d4sigma_NOFILTER(z_mm, dstar, lam_mm)
 
     m2x["M2"] = snap_m2_to_one(float(m2x["M2"]))
@@ -148,8 +143,6 @@ def compute_m2_hyperbola(
     if not return_fig:
         return results
 
-    # --- plot (rodom VISUS taškus) ---
-    # z_fit darom tik iš finite z, kad linspace negautų NaN
     z_fin = z_mm[np.isfinite(z_mm)]
     if z_fin.size == 0:
         z_fit = np.linspace(0.0, 1.0, 500)

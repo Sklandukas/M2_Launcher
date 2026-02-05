@@ -195,6 +195,7 @@ def calculate_shutter(instance, saturation_level, background_level):
     return int(new_shutter)
 
 def calculate_shutter_pid(instance, saturation_level, background_level):
+    """Alternatyvus sprendimas su PID kontroleriu"""
     min_shutter = 51
     max_shutter = 1_100_000
     target_saturation = 200
