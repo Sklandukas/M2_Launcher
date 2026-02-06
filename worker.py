@@ -1,11 +1,11 @@
 import os
 import time
 import json
-import shutil
 import cv2
 import threading
 import traceback
 import numpy as np
+import bisect
 import tkinter as tk
 import tkinter.messagebox as messagebox
 from tkinter import filedialog
@@ -28,13 +28,12 @@ from devices.camera.camera_display import prepare_for_tk
 
 from devices.axis.axis_service import AxisService
 from devices.laser.laser_service import LaserService
-from measurement.focus import find_focus
+from measurement.focus import find_focus, generate_track_by_focus
 from measurement.measurement_service import MeasurementService
 from storage.storage_service import StorageService
 
 from measurement.calculations import beam_size_k4_fixed_axes
 from measurement.quadrometer import compute_m2_hyperbola
-from measurement.focus import generate_track_by_focus
 from storage.converter import _save_data
 
 # IMPORTANT: we only use SimpleCameraCapture + FlirCameraConnection (no CameraService)
@@ -53,6 +52,10 @@ def _norm_name(x) -> str:
 
 
 def track_to_step_positions(track, steps_per_mm: int, max_steps: int):
+    """
+    Accepts either track in mm (floats) or in steps (ints).
+    Returns unique sorted step positions [0..max_steps].
+    """
     if not track:
         return []
 
@@ -85,12 +88,18 @@ def track_to_step_positions(track, steps_per_mm: int, max_steps: int):
     return sorted(set(positions))
 
 
-def prune_everything(track_positions, step_size, raw_dir, pgm_dir, images_dict, z_list, dx_list, dy_list):
+def prune_everything(track_positions, step_size, raw_dir, pgm_dir, images_dict, measurements):
+    """
+    Keeps ONLY frames whose idx is in keep_idx, where idx = steps//step_size.
+    Also prunes files (raw/pgm) and images_dict keys matching idx strings.
+    Finally prunes measurements list so lengths can never mismatch.
+    """
     if not track_positions:
         return
 
-    keep_idx = {str(int(p // step_size)) for p in track_positions}
+    keep_idx = {int(p // step_size) for p in track_positions}
 
+    # prune files by filename stem (idx)
     for d in (raw_dir, pgm_dir):
         if not d or not os.path.isdir(d):
             continue
@@ -99,7 +108,11 @@ def prune_everything(track_positions, step_size, raw_dir, pgm_dir, images_dict, 
             if not os.path.isfile(path):
                 continue
             stem, _ext = os.path.splitext(fn)
-            if _norm_name(stem) not in keep_idx:
+            try:
+                idx = int(float(_norm_name(stem)))
+            except Exception:
+                continue
+            if idx not in keep_idx:
                 try:
                     os.remove(path)
                 except Exception:
@@ -107,19 +120,15 @@ def prune_everything(track_positions, step_size, raw_dir, pgm_dir, images_dict, 
 
     if images_dict is not None:
         for k in list(images_dict.keys()):
-            if _norm_name(k) not in keep_idx:
+            try:
+                idx = int(float(_norm_name(k)))
+            except Exception:
+                continue
+            if idx not in keep_idx:
                 images_dict.pop(k, None)
 
-    new_z, new_dx, new_dy = [], [], []
-    for z, dx, dy in zip(z_list, dx_list, dy_list):
-        if _norm_name(z) in keep_idx:
-            new_z.append(z)
-            new_dx.append(dx)
-            new_dy.append(dy)
-
-    z_list[:] = new_z
-    dx_list[:] = new_dx
-    dy_list[:] = new_dy
+    if measurements is not None:
+        measurements[:] = [m for m in measurements if m["idx"] in keep_idx]
 
 
 class CameraWorker:
@@ -149,7 +158,6 @@ class CameraWorker:
         self.frame_count = 0
         self.start_time = None
 
-        # Camera connection (ONLY via FlirCameraConnection)
         self.camera_conn = None
         self.cam = None
 
@@ -172,7 +180,6 @@ class CameraWorker:
         self.measure = MeasurementService(self)
         self.storage = StorageService(self)
 
-        # UI refs
         self.root = None
         self.axis_button = None
         self.axis_status_label = None
@@ -193,7 +200,6 @@ class CameraWorker:
         self.showing_camera = True
         self.showing_gif = False
 
-        # manual photos dirs
         self.manual_photo_dir = "Manual_Photos"
         self.manual_raw_dir = os.path.join(self.manual_photo_dir, "raw")
         self.manual_pgm_dir = os.path.join(self.manual_photo_dir, "pgm")
@@ -202,12 +208,64 @@ class CameraWorker:
 
         self.raw_dir = None
 
-        print("CameraWorker ready.")
-        print("Defaults:", self.camera_defaults)
+    def _require_wavelength_nm(self) -> float:
+        if self.wavelength is None:
+            raise RuntimeError(
+                "Wavelength not set (self.wavelength is None). "
+                "Turn on laser (so get_laser_info returns wavelength) or set wavelength in Hand mode."
+            )
+        return float(self.wavelength)
 
-    # --------------------- REQUIRED BY UI: save frame ---------------------
+    def _lam_mm(self) -> float:
+        return self._require_wavelength_nm() * 1e-6
+
+    def _idx_from_steps(self, steps: int, steps_per_mm: int) -> int:
+        return int(steps // steps_per_mm)
+
+    def _z_mm_from_idx(self, idx: int) -> float:
+        return float(idx)
+
+    def _add_measurement_record(self, measurements, idx: int, res):
+        dx_mm = float(res.Dx_mm)
+        dy_mm = float(res.Dy_mm)
+        measurements.append(
+            {
+                "idx": int(idx),
+                "z_mm": self._z_mm_from_idx(int(idx)),
+                "dx_mm": dx_mm,
+                "dy_mm": dy_mm,
+            }
+        )
+
+    def _compute_m2_from_records(self, measurements, title: str):
+        if not measurements:
+            raise RuntimeError("No measurement points collected.")
+
+        z_mm = np.array([m["z_mm"] for m in measurements], dtype=float)
+        dx_mm = np.array([m["dx_mm"] for m in measurements], dtype=float)
+        dy_mm = np.array([m["dy_mm"] for m in measurements], dtype=float)
+
+        if not (len(z_mm) == len(dx_mm) == len(dy_mm)):
+            # This should never happen now, but keep a hard guard.
+            n = min(len(z_mm), len(dx_mm), len(dy_mm))
+            z_mm, dx_mm, dy_mm = z_mm[:n], dx_mm[:n], dy_mm[:n]
+
+        if len(z_mm) < 8:
+            raise RuntimeError(f"Not enough points for M² (need >= 8, have {len(z_mm)}).")
+
+        lam_mm = self._lam_mm()
+
+        return compute_m2_hyperbola(
+            z_mm, dx_mm, dy_mm, lam_mm,
+            metric="1e2_diameter",
+            z_window=(70.0, 135.0),
+            min_points=8,
+            return_fig=True,
+            units="mm",
+            title=title
+        )
+
     def save_current_frame(self):
-        """Save latest_frame to PNG in current working directory."""
         try:
             if self.latest_frame is None:
                 print("No frame to save (latest_frame is None).")
@@ -220,7 +278,6 @@ class CameraWorker:
             print(f"Error saving frame: {ex}")
             print(f"Error details: {traceback.format_exc()}")
 
-    # --------------------- Camera connect/disconnect ---------------------
     def connect_camera(self) -> bool:
         if self.cam is not None:
             return True
@@ -229,13 +286,11 @@ class CameraWorker:
             self.camera_conn.connect()
             self.cam = self.camera_conn.cam
 
-            # Apply same defaults used by UI worker code (safe even if redundant)
             try:
                 set_default_configuration(self, self.cam)
             except Exception:
                 traceback.print_exc()
 
-            # Warm-up frames (stabilize stream)
             try:
                 for _ in range(10):
                     _ = SimpleCameraCapture.capture_image_at_position(
@@ -297,7 +352,6 @@ class CameraWorker:
         else:
             apply()
 
-    # --------------------- Laser status popup ---------------------
     def show_laser_status_non_blocking(self, text: str):
         parent = getattr(self, "root", None) or getattr(self, "master", None)
         if parent is None:
@@ -312,7 +366,6 @@ class CameraWorker:
 
         win.after(3000, win.destroy)
 
-    # --------------------- Axis connection ---------------------
     def connect_to_axis(self):
         if self.axis_button:
             self.axis_button.config(state=tk.DISABLED)
@@ -320,9 +373,6 @@ class CameraWorker:
 
         def worker():
             try:
-                if not self.connect_camera():
-                    raise RuntimeError("Camera not connected")
-
                 ctrl = self.axis_service.connect(timeout_sec=12.0)
                 self.axis_controller = ctrl
                 self.axis_connected = True
@@ -339,7 +389,6 @@ class CameraWorker:
 
         Thread(target=worker, daemon=True).start()
 
-    # --------------------- Laser control ---------------------
     def toggle_laser(self):
         if not self.axis_connected or self.axis_controller is None:
             messagebox.showerror("Laser controller error", "Pirma prijunkite ašį (axis_controller).")
@@ -353,7 +402,7 @@ class CameraWorker:
 
         try:
             self.laser_service.turn_on()
-            info, serial, model, wavelength = self.laser_service.get_laser_info()
+            _info, serial, model, wavelength = self.laser_service.get_laser_info()
 
             if serial:
                 self.serial = serial
@@ -384,7 +433,6 @@ class CameraWorker:
             except Exception:
                 pass
 
-    # --------------------- Start/Stop live camera preview ---------------------
     def run(self):
         if self.running:
             return True
@@ -422,7 +470,6 @@ class CameraWorker:
 
         print("Camera stopped cleanly.")
 
-    # --------------------- Display frames in tkinter ---------------------
     def display_frame_in_tkinter(self):
         if not self.running:
             return
@@ -469,29 +516,25 @@ class CameraWorker:
             messagebox.showerror("Klaida", "Folderyje nerasta tinkamų failų (su skaičiumi pavadinime).")
             return
 
-        dx_list, dy_list, z_list = [], [], []
+        measurements = []
         for z_val, arr in data_dic.items():
             res = beam_size_k4_fixed_axes(arr, pixel_size_um=3.75, k=4.0)
-            dx_list.append(res.Dx_mm)
-            dy_list.append(res.Dy_mm)
-            z_list.append(z_val)
+            try:
+                idx = int(float(z_val))  # your folder keys are typically numbers
+            except Exception:
+                # fallback: try normalize string
+                idx = int(float(_norm_name(z_val)))
+            self._add_measurement_record(measurements, idx, res)
 
-        dx = np.array(dx_list, dtype=float) * 1e-3
-        dy = np.array(dy_list, dtype=float) * 1e-3
-        z = np.array(z_list, dtype=float) * 1e-3
-        lam_m = self.wavelength * 1e-9
-
-        (results, fig) = compute_m2_hyperbola(
-            z, dx, dy, lam_m,
-            metric="1e2_diameter",
-            z_window=(70.0, 135.0),
-            min_points=8,
-            return_fig=True,
-            units="mm",
-            title=f"Manual ({self.wavelength} nm)"
-        )
-
-        print(results)
+        try:
+            (results, fig) = self._compute_m2_from_records(
+                measurements,
+                title=f"Manual ({self.wavelength} nm)"
+            )
+        except Exception as e:
+            traceback.print_exc()
+            messagebox.showerror("Error", f"M² computation failed: {e}")
+            return
 
         if fig is None:
             messagebox.showwarning("Įspėjimas", "Nepavyko sugeneruoti M² grafiko.")
@@ -532,15 +575,32 @@ class CameraWorker:
                 max_length = self.get_from_settings_json("length_of_runners")
                 step_size = 1587  # steps per mm
 
-                focus_steps = find_focus(
-                    axis_service=self.axis_service,
-                    capture_fn=lambda pos: self.measure.capture_image(pos),
-                    beam_fn=lambda img: beam_size_k4_fixed_axes(img, pixel_size_um=3.75, k=4.0),
-                    axis_no=0,
-                    max_position=max_length,
-                    step_size=step_size,
-                    stop_event=self.stop_event
-                )
+
+                # Kad nuotraukos būtų daromos greičiau, per fokusavimo paiešką acquisition paleidžiam vieną kartą.
+                _acq_started = False
+                try:
+                    if self.cam is not None and hasattr(self.cam, "IsStreaming") and not self.cam.IsStreaming():
+                        self.cam.BeginAcquisition()
+                        _acq_started = True
+                except Exception:
+                    _acq_started = False
+
+                try:
+                    focus_steps = find_focus(
+                        axis_service=self.axis_service,
+                        capture_fn=lambda pos: self.measure.capture_image(pos),
+                        beam_fn=lambda img: beam_size_k4_fixed_axes(img, pixel_size_um=3.75, k=4.0),
+                        axis_no=0,
+                        max_position=max_length,
+                        step_size=step_size,
+                        stop_event=self.stop_event
+                    )
+                finally:
+                    try:
+                        if _acq_started and self.cam is not None and hasattr(self.cam, "IsStreaming") and self.cam.IsStreaming():
+                            self.cam.EndAcquisition()
+                    except Exception:
+                        pass
 
                 if self.stop_event.is_set():
                     self._ui_status("Proceedings suspended")
@@ -686,8 +746,11 @@ class CameraWorker:
 
     def _start_process_worker(self):
         folder_name = None
+        time1 = None
         try:
+            measurment_t1 = time.time()
             self.toggle_laser()
+            _ = self._lam_mm()  # validates wavelength; value is used later
 
             folder_name = f"M2_Data_{self.serial}_{self.model}_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
             raw_dir = os.path.join(folder_name, "raw")
@@ -698,41 +761,29 @@ class CameraWorker:
             os.makedirs(analysis_dir, exist_ok=True)
 
             max_length = self.get_from_settings_json("length_of_runners")  # steps
-            step_size = 1587  # steps per mm
+            step_size = 1587  # steps per mm (as in your original code)
 
-            z_list, dx_list, dy_list = [], [], []
+            measurements = []  # authoritative list (prevents broadcast mismatch)
             current = 0
             prev_area = None
             inc_count = 0
             track_positions = None
 
-            import bisect
-
             while current <= max_length and not self.stop_event.is_set():
-                time1 = time.time()
+                if time1 is None:
+                    time1 = time.time()
+
                 self._axis_go_to(axis_no=0, pos_steps=current)
-                print(f"current: {current}")
+                idx = self._idx_from_steps(current, step_size)
 
-                idx = int(current // step_size)
                 img, res = self.capture_save_measure(current, idx, raw_dir, pgm_dir)
-
-                if res is not None:
-                    print(f"res: {res.Dx_mm} {res.Dy_mm}")
-                else:
-                    print("res: None")
-
                 if res is None:
                     current += step_size
                     continue
 
-                dx = res.Dx_mm
-                dy = res.Dy_mm
+                self._add_measurement_record(measurements, idx, res)
 
-                z_list.append(str(idx))
-                dx_list.append(dx)
-                dy_list.append(dy)
-
-                area = dx * dy
+                area = float(res.Dx_mm) * float(res.Dy_mm)
                 if prev_area is not None and area > prev_area:
                     inc_count += 1
                 else:
@@ -740,19 +791,15 @@ class CameraWorker:
                 prev_area = area
 
                 if inc_count >= 5:
-                    focus_mm = current / float(step_size)
-                    max_mm = max_length / float(step_size)
+                    focus_mm = float(current) / float(step_size)
+                    max_mm = float(max_length) / float(step_size)
 
                     raw_track = generate_track_by_focus(focus_mm, max_mm, 1.0)
-                    print(f"raw_track generated with {len(raw_track)} points.")
-                    print(f"max_length: {max_length}")
-
                     track_positions = track_to_step_positions(
                         track=raw_track,
                         steps_per_mm=step_size,
                         max_steps=max_length
                     )
-                    print(f"track_positions count: {len(track_positions)}")
 
                     if DEBUG_TRACK:
                         print("=== TRACK DEBUG ===")
@@ -767,74 +814,74 @@ class CameraWorker:
                         raw_dir=raw_dir,
                         pgm_dir=pgm_dir,
                         images_dict=self.images_dict,
-                        z_list=z_list,
-                        dx_list=dx_list,
-                        dy_list=dy_list
+                        measurements=measurements
                     )
+
                     start_i = bisect.bisect_right(track_positions, current)
+                    measured_idx = {m["idx"] for m in measurements}
 
                     for x in track_positions[start_i:]:
-                        print(f"in another loop pos: {x}")
+                        if self.stop_event.is_set():
+                            break
+
+                        idx2 = self._idx_from_steps(x, step_size)
+                        if idx2 in measured_idx:
+                            continue
 
                         self._axis_go_to(axis_no=0, pos_steps=x)
+                        _img2, res2 = self.capture_save_measure(x, idx2, raw_dir, pgm_dir)
+                        if res2 is None:
+                            continue
 
-                        img, res = self.capture_save_measure(
-                            x,
-                            int(x // step_size),
-                            raw_dir,
-                            pgm_dir
-                        )
-                        if res is not None:
-                            print(f"res: {res.Dx_mm} {res.Dy_mm}")
+                        self._add_measurement_record(measurements, idx2, res2)
+                        measured_idx.add(idx2)
 
                     self.stop_event.set()
                     break
 
                 current += step_size
 
-            if not track_positions or self.stop_event.is_set():
-                ui_call(self.camera_label, lambda: self._ui_status("Stopped / no track"))
+
+            if len(measurements) < 8:
+                ui_call(self.camera_label, lambda: self._ui_status("Stopped / not enough points for M²"))
                 try:
                     self.axis_controller._go_home(axis_no=0)
                 except Exception:
                     pass
-                time2 = time.time()
-                try:
-                    print(f"Kiek laiko truko: {time2 - time1}")
-                except Exception:
-                    pass
                 return
 
-            measured_idx = {int(_norm_name(z)) for z in z_list}
+            (results, fig) = self._compute_m2_from_records(
+                measurements,
+                title=f"Auto ({self.wavelength} nm)"
+            )
 
-            for pos in track_positions:
-                print(f"pos: {pos}")
-                if pos >= max_length / 2:
-                    try:
-                        self.axis_controller._go_home(axis_no=0)
-                    except Exception:
-                        pass
-                    break
+            if fig is None:
+                ui_call(self.camera_label, lambda: self._ui_status("M² figure not produced"))
+                return
+            measurment_t2 = time.time()
 
-                if self.stop_event.is_set():
-                    break
 
-                idx = int(pos // step_size)
-                if idx in measured_idx:
-                    continue
 
-                self._axis_go_to(axis_no=0, pos_steps=pos)
-
-                img, res = self.capture_save_measure(pos, idx, raw_dir, pgm_dir)
-                if res is None:
-                    continue
-
-                z_list.append(str(idx))
-                dx_list.append(res.Dx_mm)
-                dy_list.append(res.Dy_mm)
-                measured_idx.add(idx)
+            print(f"Measurement time: {measurment_t2 - measurment_t1:.2f} seconds")
+            self.measurement_figure = fig
+            if self.figure_button:
+                ui_call(self.figure_button, lambda: self.figure_button.config(state=tk.NORMAL))
+            if self.save_data_button:
+                ui_call(self.save_data_button, lambda: self.save_data_button.config(state=tk.NORMAL))
 
             ui_call(self.camera_label, lambda: self._ui_status("The process is complete"))
+
+            # Optional: go home
+            try:
+                self.axis_controller._go_home(axis_no=0)
+            except Exception:
+                pass
+
+            if time1 is not None:
+                try:
+                    print(f"Kiek laiko truko: {time.time() - time1}")
+                except Exception:
+                    pass
 
         except Exception as e:
             traceback.print_exc()

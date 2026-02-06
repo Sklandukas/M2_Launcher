@@ -73,36 +73,52 @@ class MeasurementService:
 
         z_list, dx_list, dy_list = [], [], []
 
-        for pos in track:
-            if stop_flag():
-                break
+        acquisition_started = False
+        try:
+            if w.cam is not None and hasattr(w.cam, "IsStreaming") and not w.cam.IsStreaming():
+                w.cam.BeginAcquisition()
+                acquisition_started = True
+        except Exception:
+            acquisition_started = False
 
-            try:
-                axis_service.go_to(0, int(pos))
+        try:
+            for pos in track:
                 if stop_flag():
                     break
 
                 try:
-                    df = cooler.get_dataframe()
-                    if hasattr(df, "to_dict"):
-                        meta_rows.append(df.to_dict(orient="records")[0] if len(df) else {})
-                except Exception:
-                    pass
+                    axis_service.go_to(0, int(pos))
+                    if stop_flag():
+                        break
 
-                filename = (pos / step_size)  
-                img, res = self.capture_save_measure(pos, filename, raw_dir, pgm_dir)
-                if res is None:
-                    continue
+                    try:
+                        df = cooler.get_dataframe()
+                        if hasattr(df, "to_dict"):
+                            meta_rows.append(df.to_dict(orient="records")[0] if len(df) else {})
+                    except Exception:
+                        pass
 
-                dx_list.append(res.Dx_mm)
-                dy_list.append(res.Dy_mm)
-                z_list.append(pos / step_size)
+                    filename = (pos / step_size)  
+                    img, res = self.capture_save_measure(pos, filename, raw_dir, pgm_dir)
+                    if res is None:
+                        continue
 
-            except Exception as e:
-                if stop_flag():
-                    break
-                print(f"Scan error at pos {pos}: {e}")
-                traceback.print_exc()
+                    dx_list.append(res.Dx_mm)
+                    dy_list.append(res.Dy_mm)
+                    z_list.append(pos / step_size)
+
+                except Exception as e:
+                    if stop_flag():
+                        break
+                    print(f"Scan error at pos {pos}: {e}")
+                    traceback.print_exc()
+
+        finally:
+            try:
+                if acquisition_started and w.cam is not None and hasattr(w.cam, "IsStreaming") and w.cam.IsStreaming():
+                    w.cam.EndAcquisition()
+            except Exception:
+                pass
 
         meta_df = None
         try:
@@ -113,13 +129,16 @@ class MeasurementService:
         return folder_name, raw_dir, pgm_dir, z_list, dx_list, dy_list, meta_df
 
     def compute_m2(self, z_list, dx_list, dy_list, wavelength_nm, title=""):
-        z = np.asarray(z_list, dtype=float) * 1e-3    
-        dx = np.asarray(dx_list, dtype=float) * 0.001 
-        dy = np.asarray(dy_list, dtype=float) * 0.001 
-        lam = float(wavelength_nm) * 1e-9
+        # Šiame projekte z, Dx, Dy yra kaupiami milimetrais (mm), todėl jų nekeičiam.
+        z_mm  = np.asarray(z_list, dtype=float)
+        dx_mm = np.asarray(dx_list, dtype=float)
+        dy_mm = np.asarray(dy_list, dtype=float)
+
+        # Bangos ilgis paduodamas nm -> mm
+        lam_mm = float(wavelength_nm) * 1e-6
 
         return compute_m2_hyperbola(
-            z, dx, dy, lam,
+            z_mm, dx_mm, dy_mm, lam_mm,
             metric="1e2_diameter",
             z_window=(70.0, 135.0),
             min_points=8,

@@ -2,6 +2,7 @@ import numpy as np
 import math
 import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
+from typing import Dict
 
 
 def compute_m2_hyperbola(
@@ -27,6 +28,61 @@ def compute_m2_hyperbola(
         a = (M2 * lam_mm) / (math.pi * d0)
         d2 = (d0 * d0) + 16.0 * (a * a) * (zv - z0) * (zv - z0)
         return np.sqrt(np.maximum(d2, 0.0))
+    
+    def fit_m2_from_d4sigma(z_mm: np.ndarray, d_mm: np.ndarray, lam_mm: float) -> Dict[str, float]:
+        z = np.asarray(z_mm, dtype=float)
+        d = np.asarray(d_mm, dtype=float)
+
+        ok = np.isfinite(z) & np.isfinite(d) & (d > 0)
+        z = z[ok]
+        d = d[ok]
+        if z.size < 8:
+            return {"ok": 0.0, "M2": float("nan"), "z0": float("nan"), "d0": float("nan"), "rmse_mm": float("nan")}
+
+        i0 = int(np.argmin(d))
+        z0_0 = float(z[i0])
+        d0_0 = float(max(np.min(d), 1e-12))
+
+        left = max(1, int(0.15 * z.size))
+        right = max(1, int(0.15 * z.size))
+        idxs = np.r_[np.arange(0, left), np.arange(z.size - right, z.size)]
+        idxs = np.unique(idxs)
+        if idxs.size < 2:
+            idxs = np.arange(z.size)
+
+        zz = z[idxs]
+        dd = d[idxs]
+        denom = np.maximum(np.abs(zz - z0_0), 1e-6)
+        slope = float(np.median(dd / denom))
+
+        M2_0 = float(max(slope * math.pi * d0_0 / (4.0 * lam_mm), 0.8))
+        p0 = np.array([math.log(d0_0), z0_0, math.log(M2_0)], dtype=float)
+
+        def model_d(zv: np.ndarray, p: np.ndarray) -> np.ndarray:
+            d0 = float(np.exp(p[0]))
+            z0 = float(p[1])
+            M2 = float(np.exp(p[2]))
+            a = (M2 * lam_mm) / (math.pi * d0)
+            d2 = (d0 * d0) + 16.0 * (a * a) * (zv - z0) * (zv - z0)
+            return np.sqrt(np.maximum(d2, 0.0))
+
+        def resid(p: np.ndarray) -> np.ndarray:
+            return model_d(z, p) - d
+
+        scale = float(np.median(np.abs(d - np.median(d))))
+        if not np.isfinite(scale) or scale <= 0:
+            scale = 1.0
+
+        res = least_squares(resid, p0, loss="huber", f_scale=scale, max_nfev=8000)
+
+        d0 = float(np.exp(res.x[0]))
+        z0 = float(res.x[1])
+        M2 = float(np.exp(res.x[2]))
+
+        d_fit = model_d(z, res.x)
+        rmse = float(np.sqrt(np.mean((d_fit - d) ** 2)))
+
+        return {"ok": 1.0, "M2": M2, "z0": z0, "d0": d0, "rmse_mm": rmse}
 
     def fit_m2_from_d4sigma_NOFILTER(z_mm: np.ndarray, d_mm: np.ndarray, lam_mm: float) -> dict:
         zloc = np.asarray(z_mm, dtype=float).ravel()
@@ -104,6 +160,8 @@ def compute_m2_hyperbola(
         else:
             rmse = float("nan")
 
+        print(f"fit_m2_from_d4sigma_NOFILTER: M2={M2:.3f}")
+
         return {"ok": 1.0, "M2": M2, "z0": z0, "d0": d0, "rmse_mm": rmse}
 
     z = np.asarray(z, float).ravel()
@@ -127,12 +185,11 @@ def compute_m2_hyperbola(
 
     ok_mask = np.ones_like(z_mm, dtype=bool)
 
-    lam_mm = float(wavelength) * 1e3  
-
-    m2x = fit_m2_from_d4sigma_NOFILTER(z_mm, dx_mm, lam_mm)
-    m2y = fit_m2_from_d4sigma_NOFILTER(z_mm, dy_mm, lam_mm)
+    lam_mm = float(wavelength)
+    m2x = fit_m2_from_d4sigma(z_mm, dx_mm, lam_mm)
+    m2y = fit_m2_from_d4sigma(z_mm, dy_mm, lam_mm)
     dstar = np.sqrt(np.maximum(dx_mm, 0.0) * np.maximum(dy_mm, 0.0))  
-    m2s = fit_m2_from_d4sigma_NOFILTER(z_mm, dstar, lam_mm)
+    m2s = fit_m2_from_d4sigma(z_mm, dstar, lam_mm)
 
     m2x["M2"] = snap_m2_to_one(float(m2x["M2"]))
     m2y["M2"] = snap_m2_to_one(float(m2y["M2"]))
@@ -177,4 +234,6 @@ def compute_m2_hyperbola(
     )
 
     fig.tight_layout()
+
+    print(f"M^2 results: X={m2x['M2']:.3f}, Y={m2y['M2']:.3f}, *={m2s['M2']:.3f}")
     return results, fig
